@@ -3,10 +3,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import streamlit as st
+import matplotlib.pyplot as plt
 
 from sklearn.datasets import fetch_20newsgroups
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, accuracy_score, classification_report
 
 st.set_page_config(page_title="20 Newsgroups Classifier", layout="wide")
 
@@ -32,43 +34,42 @@ class NewsMLP(nn.Module):
 
 
 # ----------------------------
-# Train once, cache in memory
+# Caching layers (clean + faster iteration)
 # ----------------------------
-@st.cache_resource
-def train_and_cache():
-    SEED = 42
-
-    # 1) Data
+@st.cache_data(show_spinner=False)
+def load_dataset():
     data = fetch_20newsgroups(subset="all", remove=("headers", "footers", "quotes"))
-    X_raw, y = data.data, data.target
-    label_names = data.target_names
-    num_classes = len(label_names)
+    return data.data, data.target, data.target_names
 
-    # 2) Vectorizer
+
+@st.cache_data(show_spinner=False)
+def vectorize_texts(X_raw, max_features: int):
     vectorizer = TfidfVectorizer(
-        max_features=5000,
+        max_features=max_features,
         lowercase=True,
         stop_words="english",
         strip_accents="unicode",
         token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z]+\b",
     )
     X = vectorizer.fit_transform(X_raw).toarray().astype(np.float32)
+    return vectorizer, X
 
-    # 3) Split (we only really need train for this demo)
-    Xtr, _, ytr, _ = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=SEED
-    )
 
-    # 4) Train (CPU)
+@st.cache_resource(show_spinner=True)
+def train_model(X: np.ndarray, y: np.ndarray, num_classes: int, epochs: int, lr: float, seed: int):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
     device = torch.device("cpu")
-    model = NewsMLP(input_dim=Xtr.shape[1], num_classes=num_classes).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    model = NewsMLP(input_dim=X.shape[1], num_classes=num_classes).to(device)
+
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
     crit = nn.CrossEntropyLoss()
 
-    Xt = torch.tensor(Xtr, dtype=torch.float32, device=device)
-    yt = torch.tensor(ytr, dtype=torch.long, device=device)
+    Xt = torch.tensor(X, dtype=torch.float32, device=device)
+    yt = torch.tensor(y, dtype=torch.long, device=device)
 
-    for _ in range(8):
+    for _ in range(epochs):
         model.train()
         logits = model(Xt)
         loss = crit(logits, yt)
@@ -77,39 +78,164 @@ def train_and_cache():
         opt.step()
 
     model.eval()
-    return vectorizer, label_names, model
+    return model
 
 
-vectorizer, label_names, model = train_and_cache()
-
-
-# ----------------------------
-# UI
-# ----------------------------
-st.title("20 Newsgroups Text Classifier (PyTorch + TF-IDF)")
-st.caption("Enter text, get predicted topic with probabilities.")
-
-with st.form("predict"):
-    text = st.text_area("Paste text", height=200, placeholder="Type or paste an email/article…")
-    submitted = st.form_submit_button("Classify")
-
-
-def predict(texts):
-    X = vectorizer.transform(texts).toarray().astype(np.float32)
+@st.cache_data(show_spinner=False)
+def predict_proba(model: nn.Module, X: np.ndarray) -> np.ndarray:
     with torch.no_grad():
         logits = model(torch.tensor(X, dtype=torch.float32))
         probs = torch.softmax(logits, dim=1).cpu().numpy()
-        preds = probs.argmax(axis=1)
-    return preds, probs
+    return probs
 
 
-if submitted:
-    if not text.strip():
-        st.warning("Please enter some text.")
-    else:
-        pred, probs = predict([text])
-        pred_idx = int(pred[0])
-        st.subheader(f"Prediction: {label_names[pred_idx]}")
+def plot_confusion_matrix(cm: np.ndarray, labels, normalize: str | None):
+    # normalize: None, "true", "pred", "all"
+    cm_plot = cm.astype(np.float64)
+    title = "Confusion Matrix"
 
-        top = np.argsort(-probs[0])[:5]
-        st.write({label_names[i]: float(probs[0][i]) for i in top})
+    if normalize is not None:
+        with np.errstate(all="ignore"):
+            if normalize == "true":
+                cm_plot = cm_plot / cm_plot.sum(axis=1, keepdims=True)
+                title += " (Normalized by True)"
+            elif normalize == "pred":
+                cm_plot = cm_plot / cm_plot.sum(axis=0, keepdims=True)
+                title += " (Normalized by Pred)"
+            elif normalize == "all":
+                cm_plot = cm_plot / cm_plot.sum()
+                title += " (Normalized Overall)"
+        cm_plot = np.nan_to_num(cm_plot)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(cm_plot, interpolation="nearest")
+    fig.colorbar(im, ax=ax)
+
+    ax.set_title(title)
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
+
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_yticks(np.arange(len(labels)))
+
+    # Labels can be long; rotate + smaller font
+    ax.set_xticklabels(labels, rotation=90, fontsize=8)
+    ax.set_yticklabels(labels, fontsize=8)
+
+    fig.tight_layout()
+    return fig
+
+
+# ----------------------------
+# Sidebar controls
+# ----------------------------
+st.sidebar.header("Settings")
+
+SEED = st.sidebar.number_input("Random seed", min_value=0, max_value=10_000, value=42, step=1)
+MAX_FEATURES = st.sidebar.select_slider("TF-IDF max_features", options=[2000, 5000, 10000], value=5000)
+TEST_SIZE = st.sidebar.slider("Test size", 0.1, 0.4, 0.2, 0.05)
+EPOCHS = st.sidebar.slider("Epochs", 1, 25, 8, 1)
+LR = st.sidebar.select_slider("Learning rate", options=[1e-4, 3e-4, 1e-3, 3e-3], value=1e-3)
+
+TOP_K = st.sidebar.slider("Top-K classes to show", 3, 10, 5, 1)
+
+cm_norm = st.sidebar.selectbox(
+    "Confusion matrix normalization",
+    options=["none", "true", "pred", "all"],
+    index=1,
+)
+
+show_report = st.sidebar.checkbox("Show classification report (text)", value=False)
+
+st.sidebar.divider()
+st.sidebar.caption("Tip: Changing settings retrains because caches key off these values.")
+
+
+# ----------------------------
+# Load + vectorize + split + train
+# ----------------------------
+X_raw, y, label_names = load_dataset()
+num_classes = len(label_names)
+
+vectorizer, X_all = vectorize_texts(X_raw, max_features=MAX_FEATURES)
+
+Xtr, Xte, ytr, yte = train_test_split(
+    X_all, y, test_size=TEST_SIZE, stratify=y, random_state=SEED
+)
+
+model = train_model(Xtr, ytr, num_classes=num_classes, epochs=EPOCHS, lr=LR, seed=SEED)
+
+
+# ----------------------------
+# Layout
+# ----------------------------
+st.title("20 Newsgroups Text Classifier")
+st.caption("TF-IDF → PyTorch MLP. Type/paste text to classify, and view evaluation metrics.")
+
+tab_predict, tab_eval = st.tabs(["🔮 Predict", "📊 Evaluation"])
+
+
+# ----------------------------
+# Predict tab
+# ----------------------------
+with tab_predict:
+    left, right = st.columns([2, 1], vertical_alignment="top")
+
+    with left:
+        with st.form("predict_form"):
+            text = st.text_area(
+                "Input text",
+                height=220,
+                placeholder="Paste an email/article/post…",
+            )
+            submitted = st.form_submit_button("Classify")
+
+    with right:
+        st.subheader("Quick info")
+        st.metric("Classes", num_classes)
+        st.metric("Train samples", len(ytr))
+        st.metric("Test samples", len(yte))
+
+    if submitted:
+        if not text.strip():
+            st.warning("Please enter some text.")
+        else:
+            X_one = vectorizer.transform([text]).toarray().astype(np.float32)
+            probs = predict_proba(model, X_one)[0]
+            pred_idx = int(np.argmax(probs))
+
+            st.subheader(f"Prediction: {label_names[pred_idx]}")
+
+            # Top-K table
+            top_idx = np.argsort(-probs)[:TOP_K]
+            rows = [{"class": label_names[i], "probability": float(probs[i])} for i in top_idx]
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+            # Bar chart
+            st.bar_chart(
+                {label_names[i]: float(probs[i]) for i in top_idx},
+                horizontal=True,
+            )
+
+
+# ----------------------------
+# Evaluation tab (confusion matrix)
+# ----------------------------
+with tab_eval:
+    st.subheader("Test-set performance")
+
+    probs_te = predict_proba(model, Xte)
+    yhat = probs_te.argmax(axis=1)
+
+    acc = accuracy_score(yte, yhat)
+    st.metric("Accuracy", f"{acc:.4f}")
+
+    cm = confusion_matrix(yte, yhat, labels=np.arange(num_classes))
+
+    norm_arg = None if cm_norm == "none" else cm_norm
+    fig = plot_confusion_matrix(cm, label_names, normalize=norm_arg)
+    st.pyplot(fig, clear_figure=True)
+
+    if show_report:
+        rep = classification_report(yte, yhat, target_names=label_names, digits=4)
+        st.text(rep)
