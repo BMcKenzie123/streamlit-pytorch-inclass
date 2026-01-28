@@ -28,7 +28,8 @@ class NewsMLP(nn.Module):
     def __init__(self, input_dim, num_classes):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 512), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(input_dim, 1024), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(1024, 512), nn.ReLU(), nn.Dropout(0.3),
             nn.Linear(512, 256), nn.ReLU(), nn.Dropout(0.3),
             nn.Linear(256, num_classes)
         )
