@@ -8,7 +8,12 @@ import matplotlib.pyplot as plt
 from sklearn.datasets import fetch_20newsgroups
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, accuracy_score, classification_report
+from sklearn.metrics import (
+    confusion_matrix,
+    accuracy_score,
+    classification_report,
+    precision_recall_fscore_support,
+)
 
 st.set_page_config(page_title="20 Newsgroups Classifier", layout="wide")
 
@@ -56,7 +61,14 @@ def vectorize_texts(X_raw, max_features: int):
 
 
 @st.cache_resource(show_spinner=True)
-def train_model(X: np.ndarray, y: np.ndarray, num_classes: int, epochs: int, lr: float, seed: int):
+def train_model(
+    X: np.ndarray,
+    y: np.ndarray,
+    num_classes: int,
+    epochs: int,
+    lr: float,
+    seed: int,
+):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -146,6 +158,7 @@ cm_norm = st.sidebar.selectbox(
 )
 
 show_report = st.sidebar.checkbox("Show classification report (text)", value=False)
+show_per_class = st.sidebar.checkbox("Show per-class metrics table", value=False)
 
 st.sidebar.divider()
 st.sidebar.caption("Tip: Changing settings retrains because caches key off these values.")
@@ -219,7 +232,7 @@ with tab_predict:
 
 
 # ----------------------------
-# Evaluation tab (confusion matrix)
+# Evaluation tab (metrics + confusion matrix)
 # ----------------------------
 with tab_eval:
     st.subheader("Test-set performance")
@@ -227,15 +240,56 @@ with tab_eval:
     probs_te = predict_proba(model, Xte)
     yhat = probs_te.argmax(axis=1)
 
+    # Core metrics
     acc = accuracy_score(yte, yhat)
-    st.metric("Accuracy", f"{acc:.4f}")
 
+    # Macro averages: treats each class equally (good when classes are imbalanced)
+    prec_m, rec_m, f1_m, _ = precision_recall_fscore_support(
+        yte, yhat, average="macro", zero_division=0
+    )
+
+    # Weighted averages: weights by class support (more "overall" feel)
+    prec_w, rec_w, f1_w, _ = precision_recall_fscore_support(
+        yte, yhat, average="weighted", zero_division=0
+    )
+
+    # Display metrics
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Accuracy", f"{acc:.4f}")
+    c2.metric("Macro Precision", f"{prec_m:.4f}")
+    c3.metric("Macro Recall", f"{rec_m:.4f}")
+    c4.metric("Macro F1", f"{f1_m:.4f}")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Weighted Precision", f"{prec_w:.4f}")
+    c2.metric("Weighted Recall", f"{rec_w:.4f}")
+    c3.metric("Weighted F1", f"{f1_w:.4f}")
+
+    # Confusion matrix
     cm = confusion_matrix(yte, yhat, labels=np.arange(num_classes))
-
     norm_arg = None if cm_norm == "none" else cm_norm
     fig = plot_confusion_matrix(cm, label_names, normalize=norm_arg)
     st.pyplot(fig, clear_figure=True)
 
+    # Optional: per-class metrics table
+    if show_per_class:
+        prec_c, rec_c, f1_c, sup_c = precision_recall_fscore_support(
+            yte, yhat, average=None, zero_division=0
+        )
+        rows = [
+            {
+                "class": label_names[i],
+                "precision": float(prec_c[i]),
+                "recall": float(rec_c[i]),
+                "f1": float(f1_c[i]),
+                "support": int(sup_c[i]),
+            }
+            for i in range(num_classes)
+        ]
+        st.subheader("Per-class metrics")
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    # Optional: sklearn's full report text
     if show_report:
-        rep = classification_report(yte, yhat, target_names=label_names, digits=4)
+        rep = classification_report(yte, yhat, target_names=label_names, digits=4, zero_division=0)
         st.text(rep)
