@@ -115,7 +115,7 @@ scheduler = None     # <-- optional
 # =========================
 # TODO: Implement the training loop
 # - model.train()
-# - for each batch: zero_grad ��� forward ��� compute loss ��� backward ��� optimizer.step()
+# - for each batch: zero_grad → forward → compute loss → backward → optimizer.step()
 # - (optional) track running loss/accuracy, use scheduler.step(validation_metric) if you add validation
 def train(num_epochs=10):
     assert optimizer is not None and criterion is not None, "Set optimizer/criterion before training."
