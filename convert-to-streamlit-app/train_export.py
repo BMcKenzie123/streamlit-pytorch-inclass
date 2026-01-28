@@ -1,27 +1,35 @@
 # train_export.py
-import json, joblib, numpy as np, torch, torch.nn as nn
+import json, joblib
+import numpy as np
+import torch
+import torch.nn as nn
+
 from sklearn.datasets import fetch_20newsgroups
-from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
 
 SEED = 42
-rng = np.random.default_rng(SEED)
 
 # 1) Data
-data = fetch_20newsgroups(subset='all', remove=('headers','footers','quotes'))
+data = fetch_20newsgroups(subset="all", remove=("headers", "footers", "quotes"))
 X_raw, y = data.data, data.target
-num_classes = len(data.target_names)
+label_names = data.target_names
+num_classes = len(label_names)
 
-# 2) Vectorizer (fit once)
+# 2) Vectorizer
 vectorizer = TfidfVectorizer(
-    max_features=5000, lowercase=True, stop_words='english',
-    strip_accents='unicode', token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z]+\b"
+    max_features=5000,
+    lowercase=True,
+    stop_words="english",
+    strip_accents="unicode",
+    token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z]+\b",
 )
-X = vectorizer.fit_transform(X_raw).toarray()
+X = vectorizer.fit_transform(X_raw).toarray().astype(np.float32)
 
 # 3) Split
-from sklearn.model_selection import train_test_split
-Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y, random_state=SEED)
+Xtr, Xte, ytr, yte = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=SEED
+)
 
 # 4) Model
 class NewsMLP(nn.Module):
@@ -35,23 +43,33 @@ class NewsMLP(nn.Module):
         )
     def forward(self, x): return self.net(x)
 
-import torch
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = NewsMLP(Xtr.shape[1], num_classes).to(device)
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 crit = nn.CrossEntropyLoss()
 
-# 5) Torch training (minimal)
-def to_t(x): return torch.tensor(x, dtype=torch.float32, device=device)
-def to_y(x): return torch.tensor(x, dtype=torch.long, device=device)
-for epoch in range(8):
-    model.train()
-    logits = model(to_t(Xtr))
-    loss = crit(logits, to_y(ytr))
-    opt.zero_grad(); loss.backward(); opt.step()
+Xt = torch.tensor(Xtr, dtype=torch.float32, device=device)
+yt = torch.tensor(ytr, dtype=torch.long, device=device)
 
-# 6) Export artifacts
+# 5) Train
+for _ in range(8):
+    model.train()
+    logits = model(Xt)
+    loss = crit(logits, yt)
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+
+# 6) Export
 torch.save(model.state_dict(), "model_state_dict.pt")
 joblib.dump(vectorizer, "vectorizer.pkl")
-with open("label_names.json","w") as f: json.dump(data.target_names, f)
-print("Exported: model_state_dict.pt, vectorizer.pkl, label_names.json")
+with open("label_names.json", "w", encoding="utf-8") as f:
+    json.dump(label_names, f)
+
+with open("meta.json", "w", encoding="utf-8") as f:
+    json.dump(
+        {"input_dim": int(Xtr.shape[1]), "num_classes": int(num_classes)},
+        f
+    )
+
+print("Exported: model_state_dict.pt, vectorizer.pkl, label_names.json, meta.json")
