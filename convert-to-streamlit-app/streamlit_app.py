@@ -84,7 +84,7 @@ def train_model(X: np.ndarray, y: np.ndarray, num_classes: int, epochs: int, lr:
 @st.cache_data(show_spinner=False)
 def predict_proba(model: nn.Module, X: np.ndarray) -> np.ndarray:
     with torch.no_grad():
-        logits = model(torch.tensor(X, dtype=torch.float32))
+        logits = _model(torch.tensor(X, dtype=torch.float32))
         probs = torch.softmax(logits, dim=1).cpu().numpy()
     return probs
 
